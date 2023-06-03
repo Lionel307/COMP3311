@@ -1,0 +1,294 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... progression check for a given student
+
+import sys
+import psycopg2
+import re
+from helpers import getStudent, getProgram, getStream, getRule, getSubjects, checkRemaining
+
+# define any local helper functions here
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} zID [Program Stream]"
+db = None
+
+### process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+zid = sys.argv[1]
+if zid[0] == 'z':
+  zid = zid[1:8]
+digits = re.compile("^\d{7}$")
+if not digits.match(zid):
+  print("Invalid student ID")
+  exit(1)
+
+progCode = None
+strmCode = None
+
+if argc == 4:
+  progCode = sys.argv[2]
+  strmCode = sys.argv[3]
+
+# manipulate database
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  stuInfo = getStudent(db,zid)
+  cur = db.cursor()
+  #print(stuInfo) # debug
+  if not stuInfo:
+    print(f"Invalid student id {zid}")
+    exit()
+
+  if progCode:
+    progInfo = getProgram(db,progCode)
+    if not progInfo:
+      print(f"Invalid program code {progCode}")
+      exit()
+    #print(progInfo)  #debug
+
+  if strmCode:
+    strmInfo = getStream(db,strmCode)
+    if not strmInfo:
+      print(f"Invalid program code {strmCode}")
+      exit()
+    #print(strmInfo)  #debug
+
+  # if have a program/stream
+  #   show progression check on supplied program/stream
+  # else
+  #   show progression check on most recent program/stream enrolment
+  
+  if progCode and strmCode:
+    name = getStudent(db, zid)
+    print(f"{zid} {name[1]}, {name[2]}")
+    program = getProgram(db, progCode)
+    stream = getStream(db, strmCode)
+    print(f"  {program[0]} {program[2]}")
+    print(f"  {stream[1]} {stream[2]}\n")
+    print("Completed:")
+
+    q = """select r.type, r.name
+           from Rules r
+           join stream_rules sr on (sr.rule = r.id)
+           join Streams s on (sr.stream = s.id)
+           where s.code = %s
+           """
+    cur.execute(q, [strmCode])
+    rule_names = []
+    rule_types = []
+    for rule in cur.fetchall():
+      rule_types.append(rule[0])
+      rule_names.append(rule[1])
+    q = """select r.type, r.name
+           from Rules r
+           join program_rules pr on (pr.rule = r.id)
+           join Programs p on (pr.program = p.id)
+           where p.code = %s
+           """
+    cur.execute(q, [progCode])
+    for rule in cur.fetchall():
+      rule_types.append(rule[0])
+      rule_names.append(rule[1])
+    q1 = """select distinct s.code, t.code, s.name, c.mark, c.grade, s.uoc
+            from Course_enrolments c 
+            Join Courses d on (c.course = d.id)
+            Join Terms t on (d.term = t.id)
+            Join Subjects s on (d.subject = s.id)
+            where c.student = %s
+            order by t.code, s.code
+            """
+    cur.execute(q1, [zid])
+    subject_remaining = getSubjects(db, strmCode, progCode)
+    subject_completed = []
+    total_uoc = 0
+    for t in cur.fetchall():
+      fail = ['AF','FL','UF']
+      wam_list = ['HD', 'DN', 'CR', 'PS', 'AF', 'FL', 'UF']
+      uoc_list = ['A', 'B', 'C', 'D', 'HD', 'DN', 'CR', 'PS', 'XE', 'T', 'SY', 'EC', 'NC']
+      course_code = t[0]
+      term = t[1]
+      course_title = t[2]
+      mark = t[3]
+      grade = t[4]
+      uoc = t[5]
+      rule_name = getRule(db, course_code, rule_names)
+      
+      if course_code in subject_remaining and grade not in fail:
+        subject_remaining.remove(course_code)
+      elif course_code not in subject_remaining and grade not in fail:
+        subject_completed.append(course_code)
+
+      if grade not in fail:
+        total_uoc += uoc
+      if mark is None:
+        if grade in fail:
+          print(f"{course_code} {term} {course_title:<32s}{'-':>3s} {grade:2s}   fail does not count")
+        elif grade in uoc_list:
+          print(f"{course_code} {term} {course_title:<32s}{'-':>3s} {grade:2s}  {uoc:2d}uoc towards {rule_name}")
+        else:
+          print(f"{course_code} {term} {course_title:<32s}{'-':>3s} {grade:2s}")
+      elif grade in fail:
+        print(f"{course_code} {term} {course_title:<32s}{mark:>3d} {grade:2s}   fail does not count")
+      else:
+        print(f"{course_code} {term} {course_title:<32s}{mark:>3d} {grade:2s}  {uoc:2d}uoc towards {rule_name}")
+
+    print(f"UOC = {total_uoc} so far\n")
+    print("Remaining to complete degree:")
+    for subject in subject_remaining:
+      q4 = """select name
+              from Subjects
+              where code = %s 
+              """
+      if (";" in subject):
+      # two subject ie MATH1131 Mathematics 1A or MATH1141 Higher Mathematics 1A
+        i = subject
+        i = i.replace("{", "")
+        i = i.replace("}", "")
+        j = i.split(";")
+        if (j[0] not in subject_completed and j[1] not in subject_completed):
+          cur.execute(q4, [j[0]])    
+          print(f"- {j[0]} {cur.fetchone()[0]}")
+          cur.execute(q4, [j[1]])
+          x = cur.fetchone()
+          if not x:
+            print(f"  or {j[1]} ???")
+          else:
+            print(f"  or {j[1]} {x[0]}")
+      else:
+        
+        cur.execute(q4, [subject])
+        x = cur.fetchone()
+        if not x:
+          print(f"- {subject} ???")
+        else:
+          print(f"- {subject} {x[0]}")
+    checkRemaining(db, zid, strmCode, progCode)
+  else:
+    q = """select pe.term, p.code, st.code
+           from program_enrolments pe 
+           join stream_enrolments se on (se.partof = pe.id)
+           join Students s on (pe.student = s.id)
+           join Programs p on (pe.program = p.id)
+           join Streams st on (se.stream = st.id)
+           where s.id = %s
+           order by pe.term
+           """
+    cur.execute(q, [zid])
+    enrolment = cur.fetchone()
+    name = getStudent(db, zid)
+    print(f"{zid} {name[1]}, {name[2]}")
+    program = getProgram(db, enrolment[1])
+    stream = getStream(db, enrolment[2])
+    print(f"  {program[0]} {program[2]}")
+    print(f"  {stream[1]} {stream[2]}\n")
+    print("Completed:")
+    q = """select r.type, r.name, r.min_req, r.max_req
+           from Rules r
+           join stream_rules sr on (sr.rule = r.id)
+           join Streams s on (sr.stream = s.id)
+           where s.code = %s
+           """
+    cur.execute(q, [enrolment[2]])
+    rule_names = []
+    rule_types = []
+    for rule in cur.fetchall():
+      rule_types.append(rule[0])
+      rule_names.append(rule[1])
+    q = """select r.type, r.name, r.min_req, r.max_req
+           from Rules r
+           join program_rules pr on (pr.rule = r.id)
+           join Programs p on (pr.program = p.id)
+           where p.code = %s
+           """
+    cur.execute(q, [enrolment[1]])
+    for rule in cur.fetchall():
+      rule_types.append(rule[0])
+      rule_names.append(rule[1])
+    q1 = """select distinct s.code, t.code, s.name, c.mark, c.grade, s.uoc
+            from Course_enrolments c 
+            Join Courses d on (c.course = d.id)
+            Join Terms t on (d.term = t.id)
+            Join Subjects s on (d.subject = s.id)
+            where c.student = %s
+            order by t.code, s.code
+            """
+    cur.execute(q1, [zid])
+    subject_remaining = getSubjects(db, enrolment[2], enrolment[1])
+    subject_completed = []
+    total_uoc = 0
+    for t in cur.fetchall():
+      fail = ['AF','FL','UF']
+      wam_list = ['HD', 'DN', 'CR', 'PS', 'AF', 'FL', 'UF']
+      uoc_list = ['A', 'B', 'C', 'D', 'HD', 'DN', 'CR', 'PS', 'XE', 'T', 'SY', 'EC', 'NC']
+      course_code = t[0]
+      term = t[1]
+      course_title = t[2]
+      mark = t[3]
+      grade = t[4]
+      uoc = t[5]
+      rule_name = getRule(db, course_code, rule_names)
+      if rule_name == "does not satisfy any rule":
+        uoc = 0
+      if course_code in subject_remaining and grade not in fail:
+        subject_remaining.remove(course_code)
+      elif course_code not in subject_remaining and grade not in fail:
+        subject_completed.append(course_code)
+
+      if grade not in fail:
+        total_uoc += uoc
+      if mark is None:
+        if grade in fail:
+          print(f"{course_code} {term} {course_title:<32s}{'-':>3s} {grade:2s}   fail does not count")
+        elif grade in uoc_list:
+          print(f"{course_code} {term} {course_title:<32s}{'-':>3s} {grade:2s}  {uoc:2d}uoc towards {rule_name}")
+        else:
+          print(f"{course_code} {term} {course_title:<32s}{'-':>3s} {grade:2s}")
+      elif grade in fail:
+        print(f"{course_code} {term} {course_title:<32s}{mark:>3d} {grade:2s}   fail does not count")
+      else:
+        print(f"{course_code} {term} {course_title:<32s}{mark:>3d} {grade:2s}  {uoc:2d}uoc towards {rule_name}")
+
+    print(f"UOC = {total_uoc} so far\n")
+    print("Remaining to complete degree:")
+    for subject in subject_remaining:
+      q4 = """select name
+              from Subjects
+              where code = %s 
+              """
+      if (";" in subject):
+      # two subject ie MATH1131 Mathematics 1A or MATH1141 Higher Mathematics 1A
+        i = subject
+        i = i.replace("{", "")
+        i = i.replace("}", "")
+        j = i.split(";")
+        if (j[0] not in subject_completed and j[1] not in subject_completed):
+          cur.execute(q4, [j[0]])    
+          print(f"- {j[0]} {cur.fetchone()[0]}")
+          cur.execute(q4, [j[1]])
+          x = cur.fetchone()
+          if not x:
+            print(f"  or {j[1]} ???")
+          else:
+            print(f"  or {j[1]} {x[0]}")
+      else:
+        
+        cur.execute(q4, [subject])
+        x = cur.fetchone()
+        if not x:
+          print(f"- {subject} ???")
+        else:
+          print(f"- {subject} {x[0]}")
+    checkRemaining(db, zid, enrolment[2], enrolment[1])
+
+except Exception as err:
+  print("DB error: ", err)
+finally:
+  if db:
+    db.close()
+

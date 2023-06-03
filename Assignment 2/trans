@@ -1,0 +1,92 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... print a transcript for a given student
+
+import sys
+import psycopg2
+import re
+from helpers import getStudent
+
+# define any local helper functions here
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} zID"
+db = None
+
+### process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+zid = sys.argv[1]
+if zid[0] == 'z':
+  zid = zid[1:8]
+digits = re.compile("^\d{7}$")
+if not digits.match(zid):
+  print(f"Invalid student ID {zid}")
+  exit(1)
+
+# manipulate database
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  stuInfo = getStudent(db,zid)
+  if not stuInfo:
+    print(f"Invalid student ID {zid}")
+    exit()
+
+  #print(stuInfo) # debug
+  # Print transcript for Student
+  # ... add your code here ...
+  cur = db.cursor()
+  name = getStudent(db, zid)
+  print(f"{zid} {name[1]}, {name[2]}")
+  q1 = """select s.code, t.code, s.name, c.mark, c.grade, s.uoc
+          from Course_enrolments c 
+          Join Courses d on (c.course = d.id)
+          Join Terms t on (d.term = t.id)
+          Join Subjects s on (d.subject = s.id)
+          where c.student = %s
+          order by t.code, s.code
+          """
+  cur.execute(q1, [zid])
+  uoc = 0
+  wam = 0
+  attempt = 0
+  wam_list = ['HD', 'DN', 'CR', 'PS', 'AF', 'FL', 'UF']
+  uoc_list = ['A', 'B', 'C', 'D', 'HD', 'DN', 'CR', 'PS', 'XE', 'T', 'SY', 'EC', 'NC']
+  for t in cur.fetchall():
+    fail = ['AF','FL','UF']
+    if t[3] is None:
+      if t[4] in fail:
+        print(f"{t[0]} {t[1]} {t[2]:<32s}{'-':>3s} {t[4]:2s}   fail")
+      elif t[4] in uoc_list:
+        print(f"{t[0]} {t[1]} {t[2]:<32s}{'-':>3s} {t[4]:2s}  {t[5]:2d}uoc")
+      else:
+        print(f"{t[0]} {t[1]} {t[2]:<32s}{'-':>3s} {t[4]:2s}")
+    elif t[4] in fail:
+      print(f"{t[0]} {t[1]} {t[2]:<32s}{t[3]:>3d} {t[4]:2s}   fail")
+    else:
+      print(f"{t[0]} {t[1]} {t[2]:<32s}{t[3]:>3d} {t[4]:2s}  {t[5]:2d}uoc")
+    # in wam
+    if t[4] in wam_list:
+      if t[3] is None:
+        wam += 0
+      else:
+        wam += t[3]*t[5]
+      uoc += t[5]
+
+    # in uoc
+    if t[4] in uoc_list:
+      attempt += t[5]  
+    
+  print(f"UOC = {attempt}, WAM = {wam/uoc:.1f}")
+
+
+except Exception as err:
+  print("DB error: ", err)
+finally:
+  if db:
+    db.close()
+

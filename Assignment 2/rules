@@ -1,0 +1,226 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... print list of rules for a program or stream
+
+import sys
+import psycopg2
+import re
+from helpers import getProgram, getStream
+
+# define any local helper functions here
+# ...
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} (ProgramCode|StreamCode)"
+db = None
+
+### process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+code = sys.argv[1]
+if len(code) == 4:
+  codeOf = "program"
+elif len(code) == 6:
+  codeOf = "stream"
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  cur = db.cursor()
+  if codeOf == "program":
+    progInfo = getProgram(db,code)
+    if not progInfo:
+      print(f"Invalid program code {code}")
+      exit()
+    #print(progInfo)  #debug
+    # List the rules for Program
+    q = """select pr.program, p.name, p.uoc, p.duration, o.longName, a.TYPE, r.min_req, a.name, r.id, r.type, a.defby
+            from program_rules pr 
+            join Rules r on (pr.rule = r.id)
+            join Programs p on (pr.program = p.id)
+            join Academic_object_groups a on (a.id = r.ao_group)
+            join OrgUnits o on (p.offeredby = o.id)
+            where p.id = %s
+            """
+    cur.execute(q, [code])
+    rule = cur.fetchone()
+    
+    print(f"{rule[0]} {rule[1]}, {rule[2]} UOC, {rule[3]/12} years")
+    print(f"- offered by {rule[4]}")
+    print('Academic Requirements:')
+    cur.execute(q, [code])
+
+    for t in cur.fetchall():
+      group_type = t[5]
+      min_req = t[6]
+      academic_name = t[7]
+      rule_id = t[8]
+      rule_type = t[9]
+      def_group = t[10]
+
+      if (group_type == "stream"):
+        print(f"{min_req} stream(s) from {academic_name}")
+        q2 = """select distinct definition
+                  from Academic_object_groups
+                  where name = %s
+                  """
+        cur.execute(q2, [academic_name])    
+        s = cur.fetchone()
+        streams = s[0].split(",")
+        for stream in streams:
+          q = """select name from Streams where code = %s"""
+          cur.execute(q, [stream])    
+          x = cur.fetchone()
+          if not x:
+            print(f"- {stream} ???")
+          else:
+            print(f"- {stream} {x[0]}")
+      elif (group_type == "subject"):
+        if (academic_name == "General Education"):
+          print(f"{min_req} UOC of General Education")
+        elif (academic_name == "Industrial Training"):
+          q2 = """select distinct definition
+                  from Academic_object_groups
+                  where name = %s
+                  """
+          cur.execute(q2, [academic_name])    
+          s = cur.fetchone()
+          training = s[0].split(",")
+          print(academic_name)
+          print(f"- {training[0]} Industrial Training")
+        else:
+          if (rule_type == "CC"):
+            # core courses
+            print(f"all courses from {academic_name}")
+          elif (rule_type == "PE"):
+            # prescribed electives
+            print(f"{min_req} UOC of {academic_name}")
+          q3 = """select distinct definition
+                  from Academic_object_groups
+                  where name = %s
+                  """
+          cur.execute(q3, [academic_name])    
+          for s in cur.fetchall():
+            courses = s[0].split(",")
+            if (def_group == "pattern" and rule_type != "FE"):
+              course = ","
+              print(f"- courses matching {course.join(courses)}")
+            elif (def_group == "enumerated"): 
+              for i in courses:
+                q4 = """select name from Subjects where code = %s """
+                if (";" in i):
+                  # two subject ie MATH1131 Mathematics 1A or MATH1141 Higher Mathematics 1A
+                  i = i.replace("{", "")
+                  i = i.replace("}", "")
+                  j = i.split(";")
+                  cur.execute(q4, [j[0]])    
+                  print(f"- {j[0]} {cur.fetchone()[0]}")
+                  cur.execute(q4, [j[1]])
+                  x = cur.fetchone()
+                  if not x:
+                    print(f"  or {j[1]} ???")
+                  else:
+                    print(f"  or {j[1]} {x[0]}")
+                else:
+                  cur.execute(q4, [i])
+                  x = cur.fetchone()
+                  if not x:
+                    print(f"- {i} ???")
+                  else:
+                    print(f"- {i} {x[0]}")
+            
+          
+  elif codeOf == "stream":
+    strmInfo = getStream(db,code)
+    if not strmInfo:
+      print(f"Invalid stream code {code}")
+      exit()
+    #print(strmInfo)  #debug
+    # List the rules for Stream
+    q = """select s.name, o.longName, r.max_req, r.min_req, a.name, r.id, r.type, a.defby
+           from stream_rules sr 
+           join Rules r on (r.id = sr.rule)
+           join Streams s on (sr.stream = s.id)
+           join Academic_object_groups a on (a.id = r.ao_group)
+           join OrgUnits o on (s.offeredby = o.id)
+           where s.code = %s 
+           """
+    cur.execute(q, [code])
+    rule = cur.fetchone()
+
+    print(f"{code} {rule[0]}")
+    print(f"- offered by {rule[1]}")
+    print('Academic Requirements:')
+    cur.execute(q, [code])
+
+    for t in cur.fetchall():
+      max_req = t[2]
+      min_req = t[3]
+      academic_name = t[4]
+      rule_id = t[5]
+      rule_type = t[6]
+      def_group = t[7]
+      if (rule_type == "CC"):
+        print(f"{academic_name}")
+      elif(rule_type == "FE"):
+        if (max_req is None):
+          print(f"at least {min_req} UOC of Free Electives")
+        else:
+          print(f"{max_req} UOC of Free Electives")
+          
+      elif (rule_type == "PE"):
+        
+        if (min_req is None):
+          print(f"up to {max_req} UOC courses from {academic_name}")
+        elif(max_req is None):
+          print(f"at least {min_req} UOC courses from {academic_name}")
+        elif (min_req < max_req):
+          print(f"between {min_req} and {max_req} UOC courses from {academic_name}")
+        else:
+          print(f"{max_req} UOC courses from {academic_name}")
+
+      q3 = """select distinct definition
+              from Academic_object_groups
+              where name = %s
+              """
+      cur.execute(q3, [academic_name])    
+      for s in cur.fetchall():
+        courses = s[0].split(",")
+        if (def_group == "pattern" and rule_type != "FE"):
+          course = ","
+          print(f"- courses matching {course.join(courses)}")
+        elif (def_group == "enumerated"): 
+          for i in courses:
+            q4 = """select name
+                    from Subjects
+                    where code = %s 
+                    """
+            if (";" in i):
+              # two subject ie MATH1131 Mathematics 1A or MATH1141 Higher Mathematics 1A
+              i = i.replace("{", "")
+              i = i.replace("}", "")
+              j = i.split(";")
+              cur.execute(q4, [j[0]])    
+              print(f"- {j[0]} {cur.fetchone()[0]}")
+              cur.execute(q4, [j[1]])
+              x = cur.fetchone()
+              if not x:
+                print(f"  or {j[1]} ???")
+              else:
+                print(f"  or {j[1]} {x[0]}")
+
+            else:
+              cur.execute(q4, [i])
+              x = cur.fetchone()
+              if not x:
+                print(f"- {i} ???")
+              else:
+                print(f"- {i} {x[0]}")
+
+except Exception as err:
+  print(err)
+finally:
+  if db:
+    db.close()
